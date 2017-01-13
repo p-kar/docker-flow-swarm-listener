@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"io/ioutil"
+	"encoding/json"
 )
 
 type ServiceTestSuite struct {
@@ -37,7 +39,7 @@ func TestServiceUnitTestSuite(t *testing.T) {
 // GetServices
 
 func (s *ServiceTestSuite) Test_GetServices_ReturnsServices() {
-	services := NewService("unix:///var/run/docker.sock", "", "")
+	services := NewService("unix:///var/run/docker.sock", "", "", Slack{})
 
 	actual, _ := services.GetServices()
 
@@ -47,17 +49,8 @@ func (s *ServiceTestSuite) Test_GetServices_ReturnsServices() {
 	s.Equal("true", actual[0].Spec.Labels["com.df.distribute"])
 }
 
-//func (s *ServiceTestSuite) Test_GetServices_ReturnsError_WhenNewClientFails() {
-//	services := NewService("unix:///var/run/docker.sock", "", "")
-//	hostOrig := services.Host
-//	defer func() { services.Host = hostOrig }()
-//	services.Host = "This host does not exist"
-//	_, err := services.GetServices()
-//	s.Error(err)
-//}
-
 func (s *ServiceTestSuite) Test_GetServices_ReturnsError_WhenServiceListFails() {
-	services := NewService("unix:///this/socket/does/not/exist", "", "")
+	services := NewService("unix:///this/socket/does/not/exist", "", "", Slack{})
 
 	_, err := services.GetServices()
 
@@ -67,7 +60,7 @@ func (s *ServiceTestSuite) Test_GetServices_ReturnsError_WhenServiceListFails() 
 // GetNewServices
 
 func (s *ServiceTestSuite) Test_GetNewServices_ReturnsAllServices_WhenExecutedForTheFirstTime() {
-	service := NewService("unix:///var/run/docker.sock", "", "")
+	service := NewService("unix:///var/run/docker.sock", "", "", Slack{})
 	service.ServiceLastCreatedAt = time.Time{}
 	services, _ := service.GetServices()
 
@@ -77,7 +70,7 @@ func (s *ServiceTestSuite) Test_GetNewServices_ReturnsAllServices_WhenExecutedFo
 }
 
 func (s *ServiceTestSuite) Test_GetNewServices_ReturnsOnlyNewServices() {
-	service := NewService("unix:///var/run/docker.sock", "", "")
+	service := NewService("unix:///var/run/docker.sock", "", "", Slack{})
 	services, _ := service.GetServices()
 
 	service.GetNewServices(services)
@@ -88,7 +81,7 @@ func (s *ServiceTestSuite) Test_GetNewServices_ReturnsOnlyNewServices() {
 }
 
 func (s *ServiceTestSuite) Test_GetNewServices_AddsServices() {
-	service := NewService("unix:///var/run/docker.sock", "", "")
+	service := NewService("unix:///var/run/docker.sock", "", "", Slack{})
 	services, _ := service.GetServices()
 
 	service.GetNewServices(services)
@@ -100,7 +93,7 @@ func (s *ServiceTestSuite) Test_GetNewServices_AddsServices() {
 // GetRemovedServices
 
 func (s *ServiceTestSuite) Test_GetRemovedServices_ReturnsNamesOfRemovedServices() {
-	service := NewService("unix:///var/run/docker.sock", "", "")
+	service := NewService("unix:///var/run/docker.sock", "", "", Slack{})
 	services, _ := service.GetServices()
 	service.Services["removed-service-1"] = true
 	service.Services["removed-service-2"] = true
@@ -126,7 +119,7 @@ func (s *ServiceTestSuite) Test_NotifyServicesCreate_SendsRequests() {
 func (s *ServiceTestSuite) Test_NotifyServicesCreate_ReturnsError_WhenUrlCannotBeParsed() {
 	labels := make(map[string]string)
 	labels["com.df.notify"] = "true"
-	services := NewService("unix:///var/run/docker.sock", "%%%", "")
+	services := NewService("unix:///var/run/docker.sock", "%%%", "", Slack{})
 	err := services.NotifyServicesCreate(s.getSwarmServices(labels), 1, 0)
 
 	s.Error(err)
@@ -146,7 +139,7 @@ func (s *ServiceTestSuite) Test_NotifyServicesCreate_ReturnsError_WhenHttpStatus
 	labels := make(map[string]string)
 	labels["com.df.notify"] = "true"
 
-	services := NewService("unix:///var/run/docker.sock", httpSrv.URL, "")
+	services := NewService("unix:///var/run/docker.sock", httpSrv.URL, "", Slack{})
 	err := services.NotifyServicesCreate(s.getSwarmServices(labels), 1, 0)
 
 	s.Error(err)
@@ -156,7 +149,7 @@ func (s *ServiceTestSuite) Test_NotifyServicesCreate_ReturnsError_WhenHttpReques
 	labels := make(map[string]string)
 	labels["com.df.notify"] = "true"
 
-	service := NewService("unix:///var/run/docker.sock", "this-does-not-exist", "")
+	service := NewService("unix:///var/run/docker.sock", "this-does-not-exist", "", Slack{})
 	err := service.NotifyServicesCreate(s.getSwarmServices(labels), 1, 0)
 
 	s.Error(err)
@@ -176,11 +169,213 @@ func (s *ServiceTestSuite) Test_NotifyServicesCreate_RetriesRequests() {
 		attempt = attempt + 1
 	}))
 
-	service := NewService("unix:///var/run/docker.sock", httpSrv.URL, "")
+	service := NewService("unix:///var/run/docker.sock", httpSrv.URL, "", Slack{})
 	err := service.NotifyServicesCreate(s.getSwarmServices(labels), 3, 0)
 
 	s.NoError(err)
 }
+
+func (s *ServiceTestSuite) Test_NotifyServicesCreate_IncludesBody() {
+	expectedBody := `payload={"channel": "#random", "username": "swarm-listener", "text": "This is posted to #random and comes from a bot named swarm-listener.", "icon_emoji": ":ghost:"}`
+	labels := make(map[string]string)
+	labels["com.df.notify"] = "true"
+	labels["com.df.notifyBody"] = expectedBody
+
+	actualBody := ""
+	httpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		body, _ := ioutil.ReadAll(r.Body)
+		actualBody = string(body[:])
+	}))
+	defer func() { httpSrv.Close() }()
+	url := fmt.Sprintf("%s/v1/docker-flow-proxy/reconfigure", httpSrv.URL)
+
+	services := NewService("unix:///var/run/docker.sock", url, "", Slack{})
+	err := services.NotifyServicesCreate(s.getSwarmServices(labels), 1, 0)
+
+	s.NoError(err)
+	s.Equal(expectedBody, actualBody)
+}
+
+func (s *ServiceTestSuite) Test_NotifyServicesCreate_UsedGetMethodByDefault() {
+	expectedMethod := "GET"
+	labels := make(map[string]string)
+	labels["com.df.notify"] = "true"
+
+	actualMethod := ""
+	httpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		actualMethod = r.Method
+	}))
+	defer func() { httpSrv.Close() }()
+	url := fmt.Sprintf("%s/v1/docker-flow-proxy/reconfigure", httpSrv.URL)
+
+	services := NewService("unix:///var/run/docker.sock", url, "", Slack{})
+	err := services.NotifyServicesCreate(s.getSwarmServices(labels), 1, 0)
+
+	s.NoError(err)
+	s.Equal(expectedMethod, actualMethod)
+}
+
+func (s *ServiceTestSuite) Test_NotifyServicesCreate_IncludesMethod() {
+	expectedMethod := "PUT"
+	labels := make(map[string]string)
+	labels["com.df.notify"] = "true"
+	labels["com.df.notifyMethod"] = expectedMethod
+
+	actualMethod := ""
+	httpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		actualMethod = r.Method
+	}))
+	defer func() { httpSrv.Close() }()
+	url := fmt.Sprintf("%s/v1/docker-flow-proxy/reconfigure", httpSrv.URL)
+
+	services := NewService("unix:///var/run/docker.sock", url, "", Slack{})
+	err := services.NotifyServicesCreate(s.getSwarmServices(labels), 1, 0)
+
+	s.NoError(err)
+	s.Equal(expectedMethod, actualMethod)
+}
+
+func (s *ServiceTestSuite) Test_NotifyServicesCreate_SendsSlackRequests() {
+	labels := make(map[string]string)
+	msg := Slack{
+		Url: "slack-addr",
+		Channel: "my-channel",
+		Username: "my-user",
+		Text: "My name is {{.ServiceName}}!",
+		IconEmoji: "my-icon",
+	}
+	expectedMsg := Slack{
+		Url: "slack-addr",
+		Channel: "my-channel",
+		Username: "my-user",
+		Text: "My name is my-service!",
+		IconEmoji: "my-icon",
+	}
+
+	s.verifyNotifyServiceCreateSlack(labels, true, msg, expectedMsg)
+}
+
+func (s *ServiceTestSuite) Test_NotifyServicesCreate_ReturnsError_WhenSlackUrlCannotBeParsed() {
+	labels := make(map[string]string)
+	labels["com.df.notify"] = "true"
+	services := NewService("unix:///var/run/docker.sock", "", "", Slack{Url: "%%%"})
+	err := services.NotifyServicesCreate(s.getSwarmServices(labels), 1, 0)
+
+	s.Error(err)
+}
+
+// TODO: Finish Slack tests
+//func (s *ServiceTestSuite) Test_NotifyServicesCreate_DoesNotSendRequest_WhenDfNotifyIsNotDefined() {
+//	labels := make(map[string]string)
+//	labels["DF_key1"] = "value1"
+//
+//	s.verifyNotifyServiceCreate(labels, false, "")
+//}
+//
+//func (s *ServiceTestSuite) Test_NotifyServicesCreate_ReturnsError_WhenHttpStatusIsNot200() {
+//	httpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+//		w.WriteHeader(http.StatusNotFound)
+//	}))
+//	labels := make(map[string]string)
+//	labels["com.df.notify"] = "true"
+//
+//	services := NewService("unix:///var/run/docker.sock", httpSrv.URL, "")
+//	err := services.NotifyServicesCreate(s.getSwarmServices(labels), 1, 0)
+//
+//	s.Error(err)
+//}
+//
+//func (s *ServiceTestSuite) Test_NotifyServicesCreate_ReturnsError_WhenHttpRequestReturnsError() {
+//	labels := make(map[string]string)
+//	labels["com.df.notify"] = "true"
+//
+//	service := NewService("unix:///var/run/docker.sock", "this-does-not-exist", "")
+//	err := service.NotifyServicesCreate(s.getSwarmServices(labels), 1, 0)
+//
+//	s.Error(err)
+//}
+//
+//func (s *ServiceTestSuite) Test_NotifyServicesCreate_RetriesRequests() {
+//	attempt := 0
+//	labels := make(map[string]string)
+//	labels["com.df.notify"] = "true"
+//	httpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+//		if attempt < 2 {
+//			w.WriteHeader(http.StatusNotFound)
+//		} else {
+//			w.WriteHeader(http.StatusOK)
+//			w.Header().Set("Content-Type", "application/json")
+//		}
+//		attempt = attempt + 1
+//	}))
+//
+//	service := NewService("unix:///var/run/docker.sock", httpSrv.URL, "")
+//	err := service.NotifyServicesCreate(s.getSwarmServices(labels), 3, 0)
+//
+//	s.NoError(err)
+//}
+//
+//func (s *ServiceTestSuite) Test_NotifyServicesCreate_IncludesBody() {
+//	expectedBody := `payload={"channel": "#random", "username": "swarm-listener", "text": "This is posted to #random and comes from a bot named swarm-listener.", "icon_emoji": ":ghost:"}`
+//	labels := make(map[string]string)
+//	labels["com.df.notify"] = "true"
+//	labels["com.df.notifyBody"] = expectedBody
+//
+//	actualBody := ""
+//	httpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+//		defer r.Body.Close()
+//		body, _ := ioutil.ReadAll(r.Body)
+//		actualBody = string(body[:])
+//	}))
+//	defer func() { httpSrv.Close() }()
+//	url := fmt.Sprintf("%s/v1/docker-flow-proxy/reconfigure", httpSrv.URL)
+//
+//	services := NewService("unix:///var/run/docker.sock", url, "")
+//	err := services.NotifyServicesCreate(s.getSwarmServices(labels), 1, 0)
+//
+//	s.NoError(err)
+//	s.Equal(expectedBody, actualBody)
+//}
+//
+//func (s *ServiceTestSuite) Test_NotifyServicesCreate_UsedGetMethodByDefault() {
+//	expectedMethod := "GET"
+//	labels := make(map[string]string)
+//	labels["com.df.notify"] = "true"
+//
+//	actualMethod := ""
+//	httpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+//		actualMethod = r.Method
+//	}))
+//	defer func() { httpSrv.Close() }()
+//	url := fmt.Sprintf("%s/v1/docker-flow-proxy/reconfigure", httpSrv.URL)
+//
+//	services := NewService("unix:///var/run/docker.sock", url, "")
+//	err := services.NotifyServicesCreate(s.getSwarmServices(labels), 1, 0)
+//
+//	s.NoError(err)
+//	s.Equal(expectedMethod, actualMethod)
+//}
+//
+//func (s *ServiceTestSuite) Test_NotifyServicesCreate_IncludesMethod() {
+//	expectedMethod := "PUT"
+//	labels := make(map[string]string)
+//	labels["com.df.notify"] = "true"
+//	labels["com.df.notifyMethod"] = expectedMethod
+//
+//	actualMethod := ""
+//	httpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+//		actualMethod = r.Method
+//	}))
+//	defer func() { httpSrv.Close() }()
+//	url := fmt.Sprintf("%s/v1/docker-flow-proxy/reconfigure", httpSrv.URL)
+//
+//	services := NewService("unix:///var/run/docker.sock", url, "")
+//	err := services.NotifyServicesCreate(s.getSwarmServices(labels), 1, 0)
+//
+//	s.NoError(err)
+//	s.Equal(expectedMethod, actualMethod)
+//}
 
 // NotifyServicesRemove
 
@@ -189,7 +384,7 @@ func (s *ServiceTestSuite) Test_NotifyServicesRemove_SendsRequests() {
 }
 
 func (s *ServiceTestSuite) Test_NotifyServicesRemove_ReturnsError_WhenUrlCannotBeParsed() {
-	services := NewService("unix:///var/run/docker.sock", "", "%%%")
+	services := NewService("unix:///var/run/docker.sock", "", "%%%", Slack{})
 	err := services.NotifyServicesRemove(s.removedServices, 1, 0)
 
 	s.Error(err)
@@ -200,14 +395,14 @@ func (s *ServiceTestSuite) Test_NotifyServicesRemove_ReturnsError_WhenHttpStatus
 		w.WriteHeader(http.StatusNotFound)
 	}))
 
-	services := NewService("unix:///var/run/docker.sock", "", httpSrv.URL)
+	services := NewService("unix:///var/run/docker.sock", "", httpSrv.URL, Slack{})
 	err := services.NotifyServicesRemove(s.removedServices, 1, 0)
 
 	s.Error(err)
 }
 
 func (s *ServiceTestSuite) Test_NotifyServicesRemove_ReturnsError_WhenHttpRequestReturnsError() {
-	service := NewService("unix:///var/run/docker.sock", "", "this-does-not-exist")
+	service := NewService("unix:///var/run/docker.sock", "", "this-does-not-exist", Slack{})
 	err := service.NotifyServicesRemove(s.removedServices, 1, 0)
 
 	s.Error(err)
@@ -227,7 +422,7 @@ func (s *ServiceTestSuite) Test_NotifyServicesRemove_RetriesRequests() {
 		attempt = attempt + 1
 	}))
 
-	service := NewService("unix:///var/run/docker.sock", "", httpSrv.URL)
+	service := NewService("unix:///var/run/docker.sock", "", httpSrv.URL, Slack{})
 	err := service.NotifyServicesRemove(s.removedServices, 3, 0)
 
 	s.NoError(err)
@@ -238,7 +433,7 @@ func (s *ServiceTestSuite) Test_NotifyServicesRemove_RetriesRequests() {
 func (s *ServiceTestSuite) Test_NewService_SetsHost() {
 	expected := "this-is-a-host"
 
-	service := NewService(expected, "", "")
+	service := NewService(expected, "", "", Slack{})
 
 	s.Equal(expected, service.Host)
 }
@@ -246,9 +441,23 @@ func (s *ServiceTestSuite) Test_NewService_SetsHost() {
 func (s *ServiceTestSuite) Test_NewService_SetsNotifUrl() {
 	expected := "this-is-a-notification-url"
 
-	service := NewService("", expected, "")
+	service := NewService("", expected, "", Slack{})
 
 	s.Equal(expected, service.NotifCreateServiceUrl)
+}
+
+func (s *ServiceTestSuite) Test_NewService_SetsSlack() {
+	expected := Slack{
+		Url: "http://slack",
+		Channel: "a channel",
+		Username: "me",
+		Text: "hello from me",
+		IconEmoji: ":ghost:",
+	}
+
+	service := NewService("", "", "", expected)
+
+	s.Equal(expected, service.Slack)
 }
 
 // NewServiceFromEnv
@@ -307,6 +516,37 @@ func (s *ServiceTestSuite) Test_NewServiceFromEnv_SetsNotifRemoveServiceUrl() {
 	s.Equal(expected, service.NotifRemoveServiceUrl)
 }
 
+func (s *ServiceTestSuite) Test_NewServiceFromEnv_SetsSlack() {
+	url := os.Getenv("DF_SLACK_URL")
+	channel := os.Getenv("DF_SLACK_CHANNEL")
+	username := os.Getenv("DF_SLACK_USERNAME")
+	text := os.Getenv("DF_SLACK_TEXT")
+	iconEmoji := os.Getenv("DF_SLACK_ICON_EMOJI")
+	defer func() {
+		os.Setenv("DF_SLACK_URL", url)
+		os.Setenv("DF_SLACK_CHANNEL", channel)
+		os.Setenv("DF_SLACK_USERNAME", username)
+		os.Setenv("DF_SLACK_TEXT", text)
+		os.Setenv("DF_SLACK_ICON_EMOJI", iconEmoji)
+	}()
+	expected := Slack{
+		Url: "http://slack",
+		Channel: "a channel",
+		Username: "me",
+		Text: "hello from me",
+		IconEmoji: ":ghost:",
+	}
+	os.Setenv("DF_SLACK_URL", expected.Url)
+	os.Setenv("DF_SLACK_CHANNEL", expected.Channel)
+	os.Setenv("DF_SLACK_USERNAME", expected.Username)
+	os.Setenv("DF_SLACK_TEXT", expected.Text)
+	os.Setenv("DF_SLACK_ICON_EMOJI", expected.IconEmoji)
+
+	service := NewServiceFromEnv()
+
+	s.Equal(expected, service.Slack)
+}
+
 // Util
 
 func (s *ServiceTestSuite) verifyNotifyServiceCreate(labels map[string]string, expectSent bool, expectQuery string) {
@@ -329,13 +569,45 @@ func (s *ServiceTestSuite) verifyNotifyServiceCreate(labels map[string]string, e
 	defer func() { httpSrv.Close() }()
 	url := fmt.Sprintf("%s/v1/docker-flow-proxy/reconfigure", httpSrv.URL)
 
-	services := NewService("unix:///var/run/docker.sock", url, "")
-	err := services.NotifyServicesCreate(s.getSwarmServices(labels), 1, 0)
+	service := NewService("unix:///var/run/docker.sock", url, "", Slack{})
+	err := service.NotifyServicesCreate(s.getSwarmServices(labels), 1, 0)
 
 	s.NoError(err)
 	s.Equal(expectSent, actualSent)
 	if expectSent {
 		s.Equal(expectQuery, actualQuery)
+	}
+}
+
+func (s *ServiceTestSuite) verifyNotifyServiceCreateSlack(labels map[string]string, expectSent bool, msg, expectedMsg Slack) {
+	actualSent := false
+	actualMethod := ""
+	actualUrl := ""
+	var actualMsg Slack
+	expectedUrl := fmt.Sprintf("/%s", expectedMsg.Url)
+	httpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Header().Set("Content-Type", "application/json")
+		actualUrl = r.URL.String()
+		actualSent = true
+		actualMethod = r.Method
+		defer r.Body.Close()
+		body, _ := ioutil.ReadAll(r.Body)
+		json.Unmarshal(body, &actualMsg)
+	}))
+	defer func() { httpSrv.Close() }()
+	expectedMsg.Url = fmt.Sprintf("%s/%s", httpSrv.URL, expectedMsg.Url)
+	msg.Url = expectedMsg.Url
+
+	service := NewService("unix:///var/run/docker.sock", "", "", msg)
+	err := service.NotifyServicesCreate(s.getSwarmServices(labels), 1, 0)
+
+	s.NoError(err)
+	s.Equal(expectSent, actualSent)
+	if expectSent {
+		s.Equal(expectedUrl, actualUrl)
+		s.Equal("POST", actualMethod)
+		s.Equal(expectedMsg, actualMsg)
 	}
 }
 
@@ -359,7 +631,7 @@ func (s *ServiceTestSuite) verifyNotifyServiceRemove(expectSent bool, expectQuer
 	defer func() { httpSrv.Close() }()
 	url := fmt.Sprintf("%s/v1/docker-flow-proxy/remove", httpSrv.URL)
 
-	service := NewService("unix:///var/run/docker.sock", "", url)
+	service := NewService("unix:///var/run/docker.sock", "", url, Slack{})
 	service.Services[s.removedServices[0]] = true
 	err := service.NotifyServicesRemove(s.removedServices, 1, 0)
 

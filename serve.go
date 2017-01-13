@@ -30,7 +30,6 @@ func (m *Serve) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	case "/v1/docker-flow-swarm-listener/notify-services":
 		services, _ := m.Service.GetServices()
 		go m.Service.NotifyServicesCreate(services, 10, 5)
-		// TODO: Add response message
 		w.WriteHeader(http.StatusOK)
 	default:
 		w.WriteHeader(http.StatusNotFound)

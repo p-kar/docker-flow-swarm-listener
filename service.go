@@ -1,5 +1,10 @@
 package main
 
+// TODO: Document service labels com.df.notify, com.df.notifyBody, and com.df.notifyMethod
+// TODO: Document env. vars. DF_SLACK_URL, DF_SLACK_CHANNEL, DF_SLACK_USERNAME, DF_SLACK_TEXT, DF_SLACK_ICON_EMOJI
+// TODO: Use labels instead env. vars. when present
+// TODO: Document service labels com.df.slackUrl, com.df.slackChannel, com.df.slackUsername, com.df.slackText, com.df.slackIconEmoji
+// TODO: Write an article
 import (
 	"fmt"
 	"github.com/docker/docker/api/types"
@@ -14,17 +19,31 @@ import (
 	"os"
 	"strings"
 	"time"
+	"bytes"
+	"encoding/json"
+	"html/template"
 )
 
 var logPrintf = log.Printf
 
 type Service struct {
+	DockerClient          *client.Client
 	Host                  string
 	NotifCreateServiceUrl string
 	NotifRemoveServiceUrl string
 	Services              map[string]bool
 	ServiceLastCreatedAt  time.Time
-	DockerClient          *client.Client
+	Slack                 Slack
+}
+
+// TODO: Add to NewServiceFromEnv
+// TODO: Overwrite with service labels
+type Slack struct {
+	Url       string
+	Channel   string
+	Username  string
+	Text      string
+	IconEmoji string
 }
 
 type Servicer interface {
@@ -80,48 +99,103 @@ func (m *Service) GetRemovedServices(services []swarm.Service) []string {
 func (m *Service) NotifyServicesCreate(services []swarm.Service, retries, interval int) error {
 	errs := []error{}
 	for _, s := range services {
-		if _, ok := s.Spec.Labels["com.df.notify"]; ok {
-			urlObj, err := url.Parse(m.NotifCreateServiceUrl)
-			if err != nil {
-				logPrintf("ERROR: %s", err.Error())
-				errs = append(errs, err)
-				break
-			}
-			parameters := url.Values{}
-			parameters.Add("serviceName", s.Spec.Name)
-			for k, v := range s.Spec.Labels {
-				if strings.HasPrefix(k, "com.df") && k != "com.df.notify" {
-					parameters.Add(strings.TrimPrefix(k, "com.df."), v)
-				}
-			}
-			urlObj.RawQuery = parameters.Encode()
-			fullUrl := urlObj.String()
-			logPrintf("Sending service created notification to %s", fullUrl)
-			for i := 1; i <= retries; i++ {
-				resp, err := http.Get(fullUrl)
-				if err == nil && resp.StatusCode == http.StatusOK {
-					break
-				} else if i < retries {
-					if interval > 0 {
-						t := time.NewTicker(time.Second * time.Duration(interval))
-						<-t.C
-					}
-				} else {
-					if err != nil {
-						logPrintf("ERROR: %s", err.Error())
-						errs = append(errs, err)
-					} else if resp.StatusCode != http.StatusOK {
-						body, _ := ioutil.ReadAll(resp.Body)
-						msg := fmt.Errorf("Request %s returned status code %d\n%s", fullUrl, resp.StatusCode, string(body[:]))
-						logPrintf("ERROR: %s", msg)
-						errs = append(errs, msg)
-					}
-				}
-			}
+		if err := m.notifyServiceCreateGeneric(s, retries, interval); err != nil {
+			errs = append(errs, err)
+		}
+		if err := m.notifyServiceCreateSlack(s, retries, interval); err != nil {
+			errs = append(errs, err)
 		}
 	}
 	if len(errs) > 0 {
 		return fmt.Errorf("At least one request produced errors. Please consult logs for more details.")
+	}
+	return nil
+}
+
+func (m *Service) notifyServiceCreateSlack(service swarm.Service, retries, interval int) error {
+	if len(m.Slack.Url) > 0 {
+		slack := m.getSlackData(service)
+		_, err := url.Parse(slack.Url)
+		if err != nil {
+			logPrintf("ERROR: %s", err.Error())
+			return err
+		}
+		js, _ := json.Marshal(slack)
+		err = m.sendRequest(slack.Url, "POST", js, retries, interval)
+		return err
+	}
+	return nil
+}
+
+func (m *Service) getSlackData(service swarm.Service) Slack {
+	slack := m.Slack
+	type Data struct {
+		ServiceName string
+	}
+	data := Data{
+		ServiceName: service.Spec.Name,
+	}
+	var content bytes.Buffer
+	tmpl, _ := template.New("contentTemplate").Parse(slack.Text)
+	tmpl.Execute(&content, data)
+	slack.Text = content.String()
+	return slack
+}
+
+func (m *Service) notifyServiceCreateGeneric(service swarm.Service, retries, interval int) error {
+	if len(m.NotifCreateServiceUrl) > 0 {
+		if _, ok := service.Spec.Labels["com.df.notify"]; ok {
+			body := ""
+			method := "GET"
+			urlObj, err := url.Parse(m.NotifCreateServiceUrl)
+			if err != nil {
+				logPrintf("ERROR: %s", err.Error())
+				return err
+			}
+			parameters := url.Values{}
+			parameters.Add("serviceName", service.Spec.Name)
+			for k, v := range service.Spec.Labels {
+				if strings.HasPrefix(k, "com.df") {
+					if k == "com.df.notifyBody" {
+						body = v
+					} else if k == "com.df.notifyMethod" {
+						method = v
+					} else if k != "com.df.notify" {
+						parameters.Add(strings.TrimPrefix(k, "com.df."), v)
+					}
+				}
+			}
+			urlObj.RawQuery = parameters.Encode()
+			return m.sendRequest(urlObj.String(), method, []byte(body), retries, interval)
+		}
+	}
+	return nil
+}
+
+func (m *Service) sendRequest(url, method string, msg []byte, retries, interval int) error {
+	logPrintf("Sending service created notification to %s", url)
+	client := http.Client{}
+	for i := 1; i <= retries; i++ {
+		req, _ := http.NewRequest(method, url, bytes.NewBuffer(msg))
+		resp, err := client.Do(req)
+		if err == nil && resp.StatusCode == http.StatusOK {
+			break
+		} else if i < retries {
+			if interval > 0 {
+				t := time.NewTicker(time.Second * time.Duration(interval))
+				<-t.C
+			}
+		} else {
+			if err != nil {
+				logPrintf("ERROR: %s", err.Error())
+				return err
+			} else if resp.StatusCode != http.StatusOK {
+				body, _ := ioutil.ReadAll(resp.Body)
+				msg := fmt.Errorf("Request %s returned status code %d\n%s", url, resp.StatusCode, string(body[:]))
+				logPrintf("ERROR: %s", msg)
+				return msg
+			}
+		}
 	}
 	return nil
 }
@@ -169,11 +243,14 @@ func (m *Service) NotifyServicesRemove(services []string, retries, interval int)
 	return nil
 }
 
-func NewService(host, notifCreateServiceUrl, notifRemoveServiceUrl string) *Service {
+func NewService(host, notifCreateServiceUrl, notifRemoveServiceUrl string, slack Slack) *Service {
 	defaultHeaders := map[string]string{"User-Agent": "engine-api-cli-1.0"}
 	dc, err := client.NewClient(host, "v1.22", nil, defaultHeaders)
 	if err != nil {
 		logPrintf(err.Error())
+	}
+	if len(slack.Url) > 0 && !strings.HasPrefix(slack.Url, "http") {
+		slack.Url = fmt.Sprintf("https://%s", slack.Url)
 	}
 	return &Service{
 		Host: host,
@@ -181,6 +258,7 @@ func NewService(host, notifCreateServiceUrl, notifRemoveServiceUrl string) *Serv
 		NotifRemoveServiceUrl: notifRemoveServiceUrl,
 		Services:              make(map[string]bool),
 		DockerClient:          dc,
+		Slack:                 slack,
 	}
 }
 
@@ -197,5 +275,12 @@ func NewServiceFromEnv() *Service {
 	if len(notifRemoveServiceUrl) == 0 {
 		notifRemoveServiceUrl = os.Getenv("DF_NOTIFICATION_URL")
 	}
-	return NewService(host, notifCreateServiceUrl, notifRemoveServiceUrl)
+	slack := Slack{
+		Url: os.Getenv("DF_SLACK_URL"),
+		Channel: os.Getenv("DF_SLACK_CHANNEL"),
+		Username: os.Getenv("DF_SLACK_USERNAME"),
+		Text: os.Getenv("DF_SLACK_TEXT"),
+		IconEmoji: os.Getenv("DF_SLACK_ICON_EMOJI"),
+	}
+	return NewService(host, notifCreateServiceUrl, notifRemoveServiceUrl, slack)
 }
