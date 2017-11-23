@@ -161,3 +161,23 @@ func (m *Service) isUpdated(candidate SwarmService, cached SwarmService) bool {
 	}
 	return false
 }
+
+func (m *Service) GetServiceForEventID(event_id string) (*[]SwarmService, error) {
+	filter := filters.NewArgs()
+	filter.Add("label", fmt.Sprintf("%s=true", os.Getenv("DF_NOTIFY_LABEL")))
+	//filter.Add("label", fmt.Sprintf("id=%s", event_id))
+	services, err := m.DockerClient.ServiceList(
+		context.Background(),
+		types.ServiceListOptions{Filters: filter},
+	)
+	//log.Println("Hi, There!")
+	if err != nil {
+		logPrintf(err.Error())
+		return &[]SwarmService{}, err
+	}
+	swarmServices := []SwarmService{}
+	for _, s := range services {
+		swarmServices = append(swarmServices, SwarmService{s})
+	}
+	return &swarmServices, nil
+}
