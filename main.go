@@ -15,13 +15,13 @@ func main() {
 	serve := NewServe(s, n)
 
 	go serve.Run()
-	
+
 	eventStream, err := s.GetEventStream()
-	
+
 	if err != nil {
 		metrics.RecordError("GetEventStream")
 	}
-	
+
 	if len(n.CreateServiceAddr) > 0 {
 		for {
 			select {
