@@ -5,6 +5,7 @@ import (
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/client"
+	"github.com/docker/docker/api/types/events"
 	"golang.org/x/net/context"
 	"os"
 	"strings"
@@ -104,6 +105,27 @@ func (m *Service) GetRemovedServices(services *[]SwarmService) *[]string {
 	return &rs
 }
 
+// Returns service object for the given Event ID 
+func (m *Service) GetServiceForEventID(event_id string) (*[]SwarmService, error) {
+	filter := filters.NewArgs()
+	filter.Add("label", fmt.Sprintf("%s=true", os.Getenv("DF_NOTIFY_LABEL")))
+	filter.Add("id", event_id)
+	services, err := m.DockerClient.ServiceList(
+		context.Background(),
+		types.ServiceListOptions{Filters: filter},
+	)
+	//log.Println("Hi, There!")
+	if err != nil {
+		logPrintf(err.Error())
+		return &[]SwarmService{}, err
+	}
+	swarmServices := []SwarmService{}
+	for _, s := range services {
+		swarmServices = append(swarmServices, SwarmService{s})
+	}
+	return &swarmServices, nil
+}
+
 // NewService returns a new instance of the `Service` structure
 func NewService(host string) *Service {
 	defaultHeaders := map[string]string{"User-Agent": "engine-api-cli-1.0"}
@@ -162,22 +184,11 @@ func (m *Service) isUpdated(candidate SwarmService, cached SwarmService) bool {
 	return false
 }
 
-func (m *Service) GetServiceForEventID(event_id string) (*[]SwarmService, error) {
-	filter := filters.NewArgs()
-	filter.Add("label", fmt.Sprintf("%s=true", os.Getenv("DF_NOTIFY_LABEL")))
-	filter.Add("id", event_id)
-	services, err := m.DockerClient.ServiceList(
-		context.Background(),
-		types.ServiceListOptions{Filters: filter},
-	)
-	//log.Println("Hi, There!")
-	if err != nil {
-		logPrintf(err.Error())
-		return &[]SwarmService{}, err
-	}
-	swarmServices := []SwarmService{}
-	for _, s := range services {
-		swarmServices = append(swarmServices, SwarmService{s})
-	}
-	return &swarmServices, nil
+// Returns a stream of events in the context
+func (m *Service) GetEventStream() (<-chan events.Message, <-chan error) {
+	
+	filters := filters.NewArgs()
+	filters.Add("type", "service")
+	eventStream, err := m.DockerClient.Events(context.Background(), types.EventsOptions{Filters: filters,})
+	return eventStream, err
 }
