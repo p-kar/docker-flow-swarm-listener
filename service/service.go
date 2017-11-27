@@ -2,10 +2,9 @@ package service
 
 import (
 	"fmt"
+	"github.com/docker/docker/client"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/filters"
-	"github.com/docker/docker/client"
-	"github.com/docker/docker/api/types/events"
 	"golang.org/x/net/context"
 	"os"
 	"strings"
@@ -182,13 +181,4 @@ func (m *Service) isUpdated(candidate SwarmService, cached SwarmService) bool {
 		}
 	}
 	return false
-}
-
-// Returns a stream of events in the context
-func (m *Service) GetEventStream() (<-chan events.Message, <-chan error) {
-	
-	filters := filters.NewArgs()
-	filters.Add("type", "service")
-	eventStream, err := m.DockerClient.Events(context.Background(), types.EventsOptions{Filters: filters,})
-	return eventStream, err
 }
