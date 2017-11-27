@@ -1,12 +1,11 @@
-package main 
+package service 
 
 import (
-	"./metrics"
-	"./service"
+	"../metrics"
 )
 
-func EventHandler(event_id string, action_type string, s *(service.Service), n *(service.Notification)) error{
-	args := getArgs()
+func EventHandler(event_id string, action_type string, s *(Service), n *(Notification), Interval int, Retry int, RetryInterval int) error{
+	
 	swarm_service, err := s.GetServiceForEventID(event_id)
 	
 	if action_type == "create" {
@@ -17,8 +16,8 @@ func EventHandler(event_id string, action_type string, s *(service.Service), n *
 		}
 		err = n.ServicesCreate(
 				newServices,
-				args.Retry,
-				args.RetryInterval,
+				Retry,
+				RetryInterval,
 				)	
 		if err != nil { 
 			metrics.RecordError("ServicesCreate")
@@ -32,8 +31,8 @@ func EventHandler(event_id string, action_type string, s *(service.Service), n *
 	if action_type == "remove" {
 
 		removedServices := s.GetRemovedServices(swarm_service)
-		err = n.ServicesRemove(removedServices, args.Retry, args.RetryInterval)
-		metrics.RecordService(len(service.CachedServices))
+		err = n.ServicesRemove(removedServices, Retry, RetryInterval)
+		metrics.RecordService(len(CachedServices))
 		if err != nil {
 			metrics.RecordError("ServicesRemove")
 		}
